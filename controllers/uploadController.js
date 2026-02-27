@@ -3,55 +3,65 @@ import FolderModel from "../models/FolderModel.js";
 import mongoose from "mongoose";
 import UserModel from "../models/UserModel.js";
 import cloudinary from "../config/cloudinary.js";
+import streamifier from "streamifier";
 import path from "path";
 import fs from 'fs';
 
 
 const uploadFiles = async (req, res) => {
     const { title, folderId } = req.body;
-    const userId = req.user.id
+    const userId = req.user.id;
     const file = req.file;
+
+    if (!file) return res.json({ success: false, message: "Please add a file" });
+
     let fileUrl = null;
     let fileType = "doc";
-    let fileSize=0;
+    let fileSize = file.size;
+
     try {
-        if (file) {
-            const result = await cloudinary.uploader.upload(file.path, { resource_type: 'auto' });
-            fileUrl = result.secure_url;
-            fs.unlinkSync(file.path)
+        // Upload buffer to Cloudinary
+        const result = await new Promise((resolve, reject) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+                { resource_type: "auto" },
+                (error, result) => {
+                    if (error) reject(error);
+                    else resolve(result);
+                }
+            );
+            streamifier.createReadStream(file.buffer).pipe(uploadStream);
+        });
 
-            const ext = path.extname(file.originalname).toLowerCase();
-            if ([".jpg", ".jpeg", ".png", ".gif"].includes(ext)) fileType = "image";
-            else if ([".mp4", ".mov", ".avi"].includes(ext)) fileType = "video";
-            else if ([".mp3", ".wav"].includes(ext)) fileType = "music";
+        fileUrl = result.secure_url;
 
-            fileSize = result.bytes;
+        // Determine file type by extension
+        const ext = path.extname(file.originalname).toLowerCase();
+        if ([".jpg", ".jpeg", ".png", ".gif"].includes(ext)) fileType = "image";
+        else if ([".mp4", ".mov", ".avi"].includes(ext)) fileType = "video";
+        else if ([".mp3", ".wav"].includes(ext)) fileType = "music";
 
-        } else {
-            return res.json({ success: false, message: "Please Add File" })
-        }
+        // Save file in DB
         const newFile = await FileModel.create({
             userId,
             title,
             folderId,
             fileUrl,
             type: fileType,
-            size:fileSize
+            size: fileSize
         });
-        await FolderModel.findOneAndUpdate(
-            {_id:folderId,user:userId},{
-                $inc:{
-                    items:1,
-                    size:fileSize,
 
-                }
-            }
+        // Update folder info
+        await FolderModel.findOneAndUpdate(
+            { _id: folderId, user: userId },
+            { $inc: { items: 1, size: fileSize } }
         );
-        res.json({ success: true, message: "File added successfully" });
+
+        res.json({ success: true, message: "File added successfully", fileUrl });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
 
 const getAllFiles = async (req, res) => {
